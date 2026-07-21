@@ -1,0 +1,228 @@
+groups:
+  - name: meilisearch-availability
+    rules:
+      - alert: MeilisearchMetricsTargetDown
+        expr: up{job="meilisearch"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Meilisearch metrics target is unavailable
+          description: Prometheus cannot scrape {{ $labels.instance }} for two minutes.
+
+      - alert: MeilisearchHealthProbeFailed
+        expr: probe_success{job="meilisearch-health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Meilisearch health probe is failing
+          description: The external health probe for {{ $labels.instance }} has failed for two minutes.
+
+      - alert: WindowsExporterTargetDown
+        expr: up{job="windows"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Windows exporter is unavailable
+          description: Prometheus cannot collect VM diagnostics from {{ $labels.instance }}.
+
+      - alert: MeilisearchWindowsServiceStopped
+        expr: windows_service_state{name="Meilisearch",state="running"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Meilisearch Windows service is stopped
+          description: The Meilisearch service on {{ $labels.instance }} is not running.
+
+  - name: meilisearch-symptoms
+    rules:
+      - alert: MeilisearchHighServerErrorRatio
+        expr: |
+          (
+            sum by (instance) (
+              rate(meilisearch_http_requests_total{path!="/metrics",status=~"5.."}[5m])
+            )
+          /
+            clamp_min(
+              sum by (instance) (
+                rate(meilisearch_http_requests_total{path!="/metrics"}[5m])
+              ),
+              0.001
+            )
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Meilisearch server-error ratio is high
+          description: More than 5 percent of non-metrics requests returned 5xx for ten minutes.
+
+      - alert: MeilisearchHighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (instance, le) (
+              rate(meilisearch_http_response_time_seconds_bucket{path!="/metrics"}[5m])
+            )
+          ) > 0.250
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Meilisearch p95 latency exceeds the provisional threshold
+          description: Replace the provisional 250 ms threshold with the team-approved production SLO.
+
+      - alert: MeilisearchTaskBacklogHigh
+        expr: meilisearch_nb_tasks{kind="statuses",value="enqueued"} > 1000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Meilisearch task backlog is high
+          description: Replace 1000 with a threshold derived from normal production ingestion volume.
+
+      - alert: MeilisearchTaskFailuresIncreased
+        expr: clamp_min(delta(meilisearch_nb_tasks{kind="statuses",value="failed"}[10m]), 0) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Meilisearch failed-task count increased
+          description: Use the Loki task-event view to inspect the exact UID, index, type, and error.
+
+  - name: windows-capacity
+    rules:
+      - alert: WindowsCommitPressureHigh
+        expr: 100 * windows_memory_committed_bytes / windows_memory_commit_limit > 80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Windows commit utilization exceeds 80 percent
+          description: Review private bytes, task activity, page reads, latency, and pagefile growth.
+
+      - alert: WindowsCommitPressureCritical
+        expr: 100 * windows_memory_committed_bytes / windows_memory_commit_limit > 90
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Windows commit utilization exceeds 90 percent
+          description: The VM is approaching its current commit boundary.
+
+      - alert: WindowsAvailableMemoryLow
+        expr: 100 * windows_memory_available_bytes / windows_memory_physical_total_bytes < 15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Windows available memory is below 15 percent
+          description: Confirm whether hard paging, disk latency, or search latency is also elevated.
+
+      - alert: WindowsCpuSustainedHigh
+        expr: |
+          100 * (1 - avg by (instance) (
+            rate(windows_cpu_time_total{mode="idle"}[5m])
+          )) > 85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Windows CPU usage is sustained above 85 percent
+          description: Correlate CPU with search latency, indexing state, and queued tasks.
+
+      - alert: WindowsDiskSpaceLow
+        expr: |
+          100 * windows_logical_disk_free_bytes{volume="C:"}
+          / windows_logical_disk_size_bytes{volume="C:"} < 15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Windows system disk has less than 15 percent free space
+          description: Meilisearch must retain enough space for database growth, indexing, dumps, and snapshots.
+
+      - alert: WindowsDiskPredictedToFill
+        expr: |
+          windows_logical_disk_free_bytes{volume="C:"} > 0
+          and
+          predict_linear(windows_logical_disk_free_bytes{volume="C:"}[6h], 4 * 24 * 3600) < 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Windows system disk may fill within four days
+          description: Validate the trend and plan storage expansion or cleanup.
+
+  - name: meilisearch-task-events
+    rules:
+      - alert: MeilisearchTaskWebhookVectorDown
+        expr: up{job="vector"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Meilisearch task webhook receiver is unavailable
+          description: Prometheus cannot scrape Vector; task webhook delivery and Loki forwarding may be unavailable.
+
+      - alert: MeilisearchTaskWebhookRejected
+        expr: |
+          sum(increase(vector_http_server_responses_sent_total{
+            component_id="meilisearch_task_webhook",
+            status!~"2.."
+          }[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Meilisearch task webhook request was rejected
+          description: Vector returned a non-2xx response; check authorization, TLS, path, request size, and NDJSON validity.
+
+      - alert: MeilisearchTaskWebhookPipelineErrors
+        expr: |
+          sum(increase(vector_component_errors_total{
+            component_id=~"meilisearch_task_webhook|normalize_meilisearch_task|loki"
+          }[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Meilisearch task webhook pipeline reported errors
+          description: Vector reported receiver, normalization, buffering, or Loki delivery errors.
+
+      - alert: MeilisearchTaskWebhookSchemaInvalid
+        expr: increase(meilisearch_task_webhook_invalid_events_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Meilisearch task webhook schema was not recognized
+          description: Vector retained at least one task in the invalid-event Loki stream; verify the pinned Meilisearch payload contract.
+
+      - alert: MeilisearchTaskWebhookBufferHigh
+        expr: |
+          vector_buffer_size_bytes{component_id="loki"}
+          /
+          clamp_min(vector_buffer_max_size_bytes{component_id="loki"}, 1) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Meilisearch task webhook buffer is over 80 percent full
+          description: Vector is accumulating task events because Loki cannot keep up or is unavailable.
+
+      - alert: MeilisearchTaskWebhookEventsDiscarded
+        expr: increase(vector_buffer_discarded_events_total{component_id="loki"}[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Meilisearch task webhook events were discarded
+          description: Vector reports task events discarded from the Loki buffer; investigate disk capacity and Vector logs immediately.
+
+      - alert: LokiTargetDown
+        expr: up{job="loki"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Loki is unavailable
+          description: Prometheus cannot scrape Loki; task event drill-down may be unavailable.

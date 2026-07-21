@@ -1,0 +1,68 @@
+info:
+  name: Get Meilisearch Prometheus Metrics (WSL2 SSH Forward)
+  type: http
+  seq: 1
+  tags:
+    - monitoring
+    - meilisearch
+
+http:
+  method: GET
+  url: http://127.0.0.1:17701/tasks
+  auth:
+    type: bearer
+    token: "{{meilisearch_metrics_key}}"
+
+runtime:
+  variables:
+    - name: meilisearch_metrics_key
+      value: prototype-masater-key-2026
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "200"
+
+settings:
+  encodeUrl: true
+  timeout: 10000
+  followRedirects: false
+  maxRedirects: 0
+
+docs: |-
+  # Meilisearch Prometheus metrics
+
+  Requests the authenticated `/metrics` endpoint through a local SSH forward
+  running inside WSL2. The response is Prometheus text exposition format and can
+  be inspected directly in Bruno's response pane.
+
+  Start this command in WSL2 and leave it running while sending the request:
+
+      ssh -NT \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o ExitOnForwardFailure=yes \
+        -L 127.0.0.1:17701:10.104.0.3:17700 \
+        root@159.223.70.54
+
+  The forwarding chain is:
+
+      WSL2 127.0.0.1:17701
+        -> Ubuntu 10.104.0.3:17700
+        -> reverse SSH tunnel
+        -> Windows VM 127.0.0.1:7700
+
+  The repository file `secrets/meilisearch_metrics_key` is mounted into Prometheus
+  but is not automatically loaded by Bruno. Configure the active Bruno
+  environment variable `meilisearch_metrics_key` with the raw key value. Do not
+  include the `Bearer ` prefix; Bruno adds that prefix through the request auth
+  configuration, and do not commit the key to this collection.
+
+  From WSL2, this copies the key to the Windows clipboard without printing it:
+
+      tr -d '\\r\\n' < secrets/meilisearch_metrics_key | clip.exe
+
+  Paste it into Bruno's `meilisearch_metrics_key` variable and mark the variable
+  as secret.
+
+  The Windows VM's reverse SSH tunnel must already be running. This additional
+  local SSH forward only makes the existing Droplet listener reachable from WSL2.

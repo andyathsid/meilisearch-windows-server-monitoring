@@ -1,0 +1,162 @@
+data_dir: /var/lib/vector
+timezone: UTC
+
+secret:
+  docker_secrets:
+    type: directory
+    path: /run/secrets
+    remove_trailing_whitespace: true
+
+sources:
+  meilisearch_task_webhook:
+    type: http_server
+    address: 0.0.0.0:8687
+    path: /meilisearch/tasks
+    strict_path: true
+    method: POST
+    response_code: 200
+    framing:
+      method: newline_delimited
+      newline_delimited:
+        max_length: 1048576
+    decoding:
+      codec: json
+    auth:
+      strategy: basic
+      username: meilisearch-webhook
+      password: SECRET[docker_secrets.meilisearch_webhook_password]
+
+  vector_internal_metrics:
+    type: internal_metrics
+    namespace: vector
+    scrape_interval_secs: 5
+
+transforms:
+  normalize_meilisearch_task:
+    type: remap
+    inputs:
+      - meilisearch_task_webhook
+    file: ./normalize_meilisearch_task.vrl
+
+  invalid_task_events:
+    type: filter
+    inputs:
+      - normalize_meilisearch_task
+    condition: '.event == "meilisearch_task_invalid"'
+
+  invalid_task_metrics:
+    type: log_to_metric
+    inputs:
+      - invalid_task_events
+    metrics:
+      - type: counter
+        field: event
+        name: meilisearch_task_webhook_invalid_events_total
+        kind: incremental
+
+sinks:
+  loki:
+    type: loki
+    inputs:
+      - normalize_meilisearch_task
+    endpoint: http://loki:3100
+    path: /loki/api/v1/push
+    compression: snappy
+    out_of_order_action: accept
+    labels:
+      service_name: meilisearch-task-events
+      environment: production
+      event: "{{ event }}"
+      status: "{{ status }}"
+      task_type: "{{ type }}"
+    encoding:
+      codec: json
+    acknowledgements:
+      enabled: false
+    buffer:
+      type: disk
+      max_size: 1073741824
+      when_full: block
+
+  prometheus:
+    type: prometheus_exporter
+    inputs:
+      - vector_internal_metrics
+      - invalid_task_metrics
+    address: 0.0.0.0:9598
+    flush_period_secs: 60
+
+tests:
+  - name: normalize succeeded task
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          uid: 143
+          batchUid: 143
+          indexUid: monitoring-smoke-test
+          status: succeeded
+          type: documentAdditionOrUpdate
+          details:
+            receivedDocuments: 2
+            indexedDocuments: 2
+          enqueuedAt: "2026-07-15T09:53:34.3191314Z"
+          startedAt: "2026-07-15T09:53:34.3230935Z"
+          finishedAt: "2026-07-15T09:53:34.3353739Z"
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event_id, "meilisearch-task:143:succeeded")
+              assert_eq!(.status, "succeeded")
+              assert_eq!(.status_badge, decode_base64!("G1sxOzk3OzQybSBzdWNjZWVkZWQgG1swbQ=="))
+              assert_eq!(.index_uid, "monitoring-smoke-test")
+              assert_eq!(.received_documents, 2)
+              assert!(is_timestamp(.timestamp))
+              assert!(to_float!(.duration_seconds) > 0.0)
+              assert!(to_float!(.queue_wait_seconds) > 0.0)
+
+  - name: normalize failed global task
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          uid: 144
+          status: failed
+          type: indexSwap
+          enqueuedAt: "2026-07-15T10:00:00Z"
+          startedAt: "2026-07-15T10:00:01Z"
+          finishedAt: "2026-07-15T10:00:02Z"
+          error:
+            code: invalid_swap
+            type: invalid_request
+            message: controlled failure
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event_id, "meilisearch-task:144:failed")
+              assert_eq!(.status_badge, decode_base64!("G1sxOzk3OzQxbSBmYWlsZWQgG1swbQ=="))
+              assert_eq!(.index_uid, "_global")
+              assert_eq!(.error_code, "invalid_swap")
+              assert_eq!(.error_message, "controlled failure")
+
+  - name: retain invalid task for investigation
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          uid: 145
+          status: processing
+          type: documentAdditionOrUpdate
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event, "meilisearch_task_invalid")
+              assert_eq!(.status, "invalid")
+              assert_eq!(.status_badge, decode_base64!("G1sxOzk3OzQ1bSBpbnZhbGlkIBtbMG0="))
+              assert_eq!(.original.uid, 145)

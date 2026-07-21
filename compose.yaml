@@ -1,0 +1,104 @@
+services:
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:?set PROMETHEUS_VERSION}
+    container_name: meili-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=20GB
+      - --web.enable-lifecycle
+    ports:
+      - 0.0.0.0:9090:9090
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    secrets:
+      - meilisearch_metrics_key
+    depends_on:
+      - blackbox-exporter
+      - loki
+      - vector
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:${BLACKBOX_EXPORTER_VERSION:?set BLACKBOX_EXPORTER_VERSION}
+    container_name: meili-blackbox-exporter
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/blackbox_exporter/blackbox.yml
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox_exporter/blackbox.yml:ro
+
+  vector:
+    image: timberio/vector:${VECTOR_VERSION:?set VECTOR_VERSION}
+    container_name: meili-vector
+    restart: unless-stopped
+    working_dir: /etc/vector
+    command:
+      - --config
+      - /etc/vector/vector.yaml
+    ports:
+      - 0.0.0.0:8687:8687
+      - 127.0.0.1:9598:9598
+    volumes:
+      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
+      - ./vector/normalize_meilisearch_task.vrl:/etc/vector/normalize_meilisearch_task.vrl:ro
+      - vector_data:/var/lib/vector
+    secrets:
+      - meilisearch_webhook_password
+      - vector_webhook_tls_cert
+      - vector_webhook_tls_key
+    depends_on:
+      - loki
+
+  loki:
+    image: grafana/loki:${LOKI_VERSION:?set LOKI_VERSION}
+    container_name: meili-loki
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/loki/loki.yml
+    ports:
+      - 127.0.0.1:3100:3100
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:?set GRAFANA_VERSION}
+    container_name: meili-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    ports:
+      - 0.0.0.0:3000:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    secrets:
+      - grafana_admin_password
+    depends_on:
+      - prometheus
+      - loki
+
+secrets:
+  meilisearch_metrics_key:
+    file: ./secrets/meilisearch_metrics_key
+  meilisearch_webhook_password:
+    file: ./secrets/meilisearch_webhook_password
+  vector_webhook_tls_cert:
+    file: ./secrets/vector_webhook_tls.crt
+  vector_webhook_tls_key:
+    file: ./secrets/vector_webhook_tls.key
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  vector_data:

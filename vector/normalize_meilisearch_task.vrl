@@ -1,0 +1,118 @@
+original = .
+valid_status = .status == "succeeded" || .status == "failed" || .status == "canceled"
+valid = exists(.uid) && exists(.finishedAt) && exists(.type) && valid_status
+
+if valid {
+  uid = to_int!(.uid)
+  status = to_string!(original.status)
+  status_badge = if status == "succeeded" {
+    decode_base64!("G1sxOzk3OzQybSBzdWNjZWVkZWQgG1swbQ==")
+  } else if status == "canceled" {
+    decode_base64!("G1sxOzMwOzQzbSBjYW5jZWxlZCAbWzBt")
+  } else {
+    decode_base64!("G1sxOzk3OzQxbSBmYWlsZWQgG1swbQ==")
+  }
+
+  batch_uid = null
+  if exists(.batchUid) && !is_null(.batchUid) {
+    parsed_batch_uid, batch_uid_error = to_int(.batchUid)
+    if batch_uid_error == null && parsed_batch_uid >= 0 {
+      batch_uid = parsed_batch_uid
+    }
+  }
+
+  index_uid = "_global"
+  if exists(.indexUid) && !is_null(.indexUid) {
+    index_uid = to_string!(.indexUid)
+  }
+
+  received_documents = null
+  indexed_documents = null
+  if is_object(.details) {
+    if exists(.details.receivedDocuments) && !is_null(.details.receivedDocuments) {
+      parsed_received, received_error = to_int(.details.receivedDocuments)
+      if received_error == null && parsed_received >= 0 {
+        received_documents = parsed_received
+      }
+    }
+    if exists(.details.indexedDocuments) && !is_null(.details.indexedDocuments) {
+      parsed_indexed, indexed_error = to_int(.details.indexedDocuments)
+      if indexed_error == null && parsed_indexed >= 0 {
+        indexed_documents = parsed_indexed
+      }
+    }
+  }
+
+  error_code = null
+  error_type = null
+  error_message = null
+  if is_object(.error) {
+    if exists(.error.code) && !is_null(.error.code) {
+      error_code = to_string!(.error.code)
+    }
+    if exists(.error.type) && !is_null(.error.type) {
+      error_type = to_string!(.error.type)
+    }
+    if exists(.error.message) && !is_null(.error.message) {
+      error_message = to_string!(.error.message)
+    }
+  }
+
+  finished_time = parse_timestamp!(to_string!(.finishedAt), format: "%+")
+  duration_seconds = null
+  queue_wait_seconds = null
+  if exists(.startedAt) && !is_null(.startedAt) {
+    started_time, started_error = parse_timestamp(to_string!(.startedAt), format: "%+")
+    if started_error == null {
+      duration_seconds = (to_float(to_unix_timestamp(finished_time, unit: "nanoseconds")) - to_float(to_unix_timestamp(started_time, unit: "nanoseconds"))) / 1000000000.0
+      if duration_seconds < 0.0 {
+        duration_seconds = 0.0
+      }
+      if exists(.enqueuedAt) && !is_null(.enqueuedAt) {
+        enqueued_time, enqueued_error = parse_timestamp(to_string!(.enqueuedAt), format: "%+")
+        if enqueued_error == null {
+          queue_wait_seconds = (to_float(to_unix_timestamp(started_time, unit: "nanoseconds")) - to_float(to_unix_timestamp(enqueued_time, unit: "nanoseconds"))) / 1000000000.0
+          if queue_wait_seconds < 0.0 {
+            queue_wait_seconds = 0.0
+          }
+        }
+      }
+    }
+  }
+
+  . = {
+    "event": "meilisearch_task_finished",
+    "event_id": "meilisearch-task:" + to_string(uid) + ":" + status,
+    "uid": uid,
+    "batch_uid": batch_uid,
+    "index_uid": index_uid,
+    "status": status,
+    "status_badge": status_badge,
+    "type": to_string!(original.type),
+    "received_documents": received_documents,
+    "indexed_documents": indexed_documents,
+    "duration_seconds": duration_seconds,
+    "queue_wait_seconds": queue_wait_seconds,
+    "enqueued_at": original.enqueuedAt,
+    "started_at": original.startedAt,
+    "finished_at": original.finishedAt,
+    "error_code": error_code,
+    "error_type": error_type,
+    "error_message": error_message,
+    "timestamp": finished_time
+  }
+} else {
+  . = {
+    "event": "meilisearch_task_invalid",
+    "event_id": "meilisearch-task:invalid",
+    "uid": null,
+    "batch_uid": null,
+    "index_uid": "_global",
+    "status": "invalid",
+    "status_badge": decode_base64!("G1sxOzk3OzQ1bSBpbnZhbGlkIBtbMG0="),
+    "type": "unknown",
+    "schema_error": "task requires uid, terminal status, type, and finishedAt",
+    "original": original,
+    "timestamp": now()
+  }
+}

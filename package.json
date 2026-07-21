@@ -1,0 +1,18 @@
+{
+  "name": "meili-monitoring-showcase",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Windows Meilisearch monitoring showcase and benchmark utilities",
+  "scripts": {
+    "showcase": "node showcase-meilisearch-monitoring-windows.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "dependencies": {
+    "@meilisearch/instant-meilisearch": "0.31.2",
+    "cli-progress": "3.12.0",
+    "meilisearch": "0.57.0"
+  }
+}

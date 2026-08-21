@@ -1,44 +1,109 @@
+# Convoy forwards the original JSON body. Remove metadata added by Vector's
+# internal HTTP source before validating or retaining the original payload.
+del(.path)
+del(.source_type)
+del(.timestamp)
+
 original = .
-valid_status = .status == "succeeded" || .status == "failed" || .status == "canceled"
-valid = exists(.uid) && exists(.finishedAt) && exists(.type) && valid_status
+payload_json = encode_json(original)
+payload_bytes = length(payload_json)
+payload_hash = sha2(payload_json, variant: "SHA-256")
+
+source_id = "_invalid"
+source_valid = false
+if is_string(original.source_id) && match!(original.source_id, r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$') {
+  source_id = original.source_id
+  source_valid = true
+}
+
+generation = "_invalid"
+generation_valid = false
+if is_string(original.generation) && match!(original.generation, r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$') {
+  generation = original.generation
+  generation_valid = true
+}
+
+environment = "unknown"
+if is_string(original.environment) && length!(original.environment) > 0 {
+  environment = original.environment
+}
+
+received_time = t'1970-01-01T00:00:00Z'
+received_at = null
+if is_string(original.received_at) {
+  parsed_received, received_error = parse_timestamp(original.received_at, format: "%+")
+  if received_error == null {
+    received_time = parsed_received
+    received_at = original.received_at
+  }
+}
+
+uid = null
+uid_valid = false
+if is_integer(original.uid) {
+  uid_candidate = to_int!(original.uid)
+  if uid_candidate >= 0 {
+    uid = uid_candidate
+    uid_valid = true
+  }
+}
+
+status = "invalid"
+status_valid = false
+if is_string(original.status) {
+  status = original.status
+  status_valid = status == "succeeded" || status == "failed" || status == "canceled"
+}
+
+task_type = null
+type_valid = false
+if is_string(original.type) && length!(original.type) > 0 {
+  task_type = original.type
+  type_valid = true
+}
+
+finished_time = null
+finished_at = null
+finished_valid = false
+if is_string(original.finishedAt) {
+  parsed_finished, finished_error = parse_timestamp(original.finishedAt, format: "%+")
+  if finished_error == null {
+    finished_time = parsed_finished
+    finished_at = original.finishedAt
+    finished_valid = true
+  }
+}
+
+payload_valid = payload_bytes <= 1048576
+valid = source_valid && generation_valid && uid_valid && status_valid && type_valid && finished_valid && payload_valid
 
 if valid {
-  uid = to_int!(.uid)
-  status = to_string!(original.status)
-  status_badge = if status == "succeeded" {
-    decode_base64!("G1sxOzk3OzQybSBzdWNjZWVkZWQgG1swbQ==")
-  } else if status == "canceled" {
-    decode_base64!("G1sxOzMwOzQzbSBjYW5jZWxlZCAbWzBt")
-  } else {
-    decode_base64!("G1sxOzk3OzQxbSBmYWlsZWQgG1swbQ==")
-  }
-
   batch_uid = null
-  if exists(.batchUid) && !is_null(.batchUid) {
-    parsed_batch_uid, batch_uid_error = to_int(.batchUid)
-    if batch_uid_error == null && parsed_batch_uid >= 0 {
-      batch_uid = parsed_batch_uid
+  if is_integer(original.batchUid) {
+    batch_uid_candidate = to_int!(original.batchUid)
+    if batch_uid_candidate >= 0 {
+      batch_uid = batch_uid_candidate
     }
   }
 
   index_uid = "_global"
-  if exists(.indexUid) && !is_null(.indexUid) {
-    index_uid = to_string!(.indexUid)
+  if is_string(original.indexUid) && length!(original.indexUid) > 0 {
+    index_uid = original.indexUid
   }
 
   received_documents = null
   indexed_documents = null
-  if is_object(.details) {
-    if exists(.details.receivedDocuments) && !is_null(.details.receivedDocuments) {
-      parsed_received, received_error = to_int(.details.receivedDocuments)
-      if received_error == null && parsed_received >= 0 {
-        received_documents = parsed_received
+  if is_object(original.details) {
+    if is_integer(original.details.receivedDocuments) {
+      received_documents_candidate = to_int!(original.details.receivedDocuments)
+      if received_documents_candidate >= 0 {
+        received_documents = received_documents_candidate
       }
     }
-    if exists(.details.indexedDocuments) && !is_null(.details.indexedDocuments) {
-      parsed_indexed, indexed_error = to_int(.details.indexedDocuments)
-      if indexed_error == null && parsed_indexed >= 0 {
-        indexed_documents = parsed_indexed
+    if is_integer(original.details.indexedDocuments) {
+      indexed_documents_candidate = to_int!(original.details.indexedDocuments)
+      if indexed_documents_candidate >= 0 {
+        indexed_documents = indexed_documents_candidate
       }
     }
   }
@@ -46,73 +111,153 @@ if valid {
   error_code = null
   error_type = null
   error_message = null
-  if is_object(.error) {
-    if exists(.error.code) && !is_null(.error.code) {
-      error_code = to_string!(.error.code)
+  if is_object(original.error) {
+    if is_string(original.error.code) {
+      error_code = original.error.code
     }
-    if exists(.error.type) && !is_null(.error.type) {
-      error_type = to_string!(.error.type)
+    if is_string(original.error.type) {
+      error_type = original.error.type
     }
-    if exists(.error.message) && !is_null(.error.message) {
-      error_message = to_string!(.error.message)
+    if is_string(original.error.message) {
+      error_message = original.error.message
     }
   }
 
-  finished_time = parse_timestamp!(to_string!(.finishedAt), format: "%+")
+  enqueued_at = null
+  enqueued_time = null
+  if is_string(original.enqueuedAt) {
+    parsed_enqueued, enqueued_error = parse_timestamp(original.enqueuedAt, format: "%+")
+    if enqueued_error == null {
+      enqueued_time = parsed_enqueued
+      enqueued_at = original.enqueuedAt
+    }
+  }
+
+  started_at = null
+  started_time = null
+  if is_string(original.startedAt) {
+    parsed_started, started_error = parse_timestamp(original.startedAt, format: "%+")
+    if started_error == null {
+      started_time = parsed_started
+      started_at = original.startedAt
+    }
+  }
+
   duration_seconds = null
   queue_wait_seconds = null
-  if exists(.startedAt) && !is_null(.startedAt) {
-    started_time, started_error = parse_timestamp(to_string!(.startedAt), format: "%+")
-    if started_error == null {
-      duration_seconds = (to_float(to_unix_timestamp(finished_time, unit: "nanoseconds")) - to_float(to_unix_timestamp(started_time, unit: "nanoseconds"))) / 1000000000.0
-      if duration_seconds < 0.0 {
-        duration_seconds = 0.0
-      }
-      if exists(.enqueuedAt) && !is_null(.enqueuedAt) {
-        enqueued_time, enqueued_error = parse_timestamp(to_string!(.enqueuedAt), format: "%+")
-        if enqueued_error == null {
-          queue_wait_seconds = (to_float(to_unix_timestamp(started_time, unit: "nanoseconds")) - to_float(to_unix_timestamp(enqueued_time, unit: "nanoseconds"))) / 1000000000.0
-          if queue_wait_seconds < 0.0 {
-            queue_wait_seconds = 0.0
-          }
-        }
+  if started_time != null {
+    finished_nanoseconds = to_float(to_unix_timestamp!(finished_time, unit: "nanoseconds"))
+    started_nanoseconds = to_float(to_unix_timestamp!(started_time, unit: "nanoseconds"))
+    duration_seconds = (finished_nanoseconds - started_nanoseconds) / 1000000000.0
+    if duration_seconds < 0.0 {
+      duration_seconds = 0.0
+    }
+
+    if enqueued_time != null {
+      enqueued_nanoseconds = to_float(to_unix_timestamp!(enqueued_time, unit: "nanoseconds"))
+      queue_wait_seconds = (started_nanoseconds - enqueued_nanoseconds) / 1000000000.0
+      if queue_wait_seconds < 0.0 {
+        queue_wait_seconds = 0.0
       }
     }
   }
+
+  task_type_label = "unknown"
+  known_task_type = task_type == "documentAdditionOrUpdate" ||
+    task_type == "documentDeletion" ||
+    task_type == "settingsUpdate" ||
+    task_type == "indexCreation" ||
+    task_type == "indexDeletion" ||
+    task_type == "indexUpdate" ||
+    task_type == "indexSwap" ||
+    task_type == "taskCancelation" ||
+    task_type == "taskDeletion" ||
+    task_type == "dumpCreation" ||
+    task_type == "snapshotCreation" ||
+    task_type == "upgradeDatabase"
+  if known_task_type {
+    task_type_label = task_type
+  }
+
+  valid_source_id = to_string!(source_id)
+  valid_generation = to_string!(generation)
+  valid_uid = to_string(uid)
+  event_id = "meilisearch:" + valid_source_id + ":" + valid_generation + ":" + valid_uid
+  archive_key = "source=" + valid_source_id + "/generation=" + valid_generation + "/uid=" + valid_uid
 
   . = {
     "event": "meilisearch_task_finished",
-    "event_id": "meilisearch-task:" + to_string(uid) + ":" + status,
+    "event_id": event_id,
+    "source_id": source_id,
+    "generation": generation,
+    "environment": environment,
     "uid": uid,
     "batch_uid": batch_uid,
     "index_uid": index_uid,
     "status": status,
-    "status_badge": status_badge,
-    "type": to_string!(original.type),
+    "type": task_type,
+    "task_type": task_type_label,
     "received_documents": received_documents,
     "indexed_documents": indexed_documents,
     "duration_seconds": duration_seconds,
     "queue_wait_seconds": queue_wait_seconds,
-    "enqueued_at": original.enqueuedAt,
-    "started_at": original.startedAt,
-    "finished_at": original.finishedAt,
+    "enqueued_at": enqueued_at,
+    "started_at": started_at,
+    "finished_at": finished_at,
+    "received_at": received_at,
     "error_code": error_code,
     "error_type": error_type,
     "error_message": error_message,
+    "archive_key": archive_key,
     "timestamp": finished_time
   }
 } else {
+  schema_error = "task payload failed validation"
+  if !source_valid {
+    schema_error = "source_id must be a safe 1-64 character identifier"
+  } else if !generation_valid {
+    schema_error = "generation must be a safe 1-64 character identifier"
+  } else if !uid_valid {
+    schema_error = "uid must be a non-negative integer"
+  } else if !status_valid {
+    schema_error = "status must be succeeded, failed, or canceled"
+  } else if !type_valid {
+    schema_error = "type must be a non-empty string"
+  } else if !finished_valid {
+    schema_error = "finishedAt must be an RFC 3339 timestamp"
+  } else if !payload_valid {
+    schema_error = "payload exceeds 1048576 bytes"
+  }
+
+  invalid_source_id = to_string!(source_id)
+  invalid_generation = to_string!(generation)
+  invalid_prefix = "meilisearch:" + invalid_source_id + ":" + invalid_generation + ":invalid:"
+  event_id = invalid_prefix + payload_hash
+  if is_string(original.event_id) {
+    original_event_id = string!(original.event_id)
+    if starts_with(original_event_id, invalid_prefix) {
+      event_id = original_event_id
+    }
+  }
+  archive_key = "source=" + invalid_source_id + "/generation=" + invalid_generation + "/invalid/sha256=" + payload_hash
+
   . = {
     "event": "meilisearch_task_invalid",
-    "event_id": "meilisearch-task:invalid",
+    "event_id": event_id,
+    "source_id": source_id,
+    "generation": generation,
+    "environment": environment,
     "uid": null,
     "batch_uid": null,
     "index_uid": "_global",
     "status": "invalid",
-    "status_badge": decode_base64!("G1sxOzk3OzQ1bSBpbnZhbGlkIBtbMG0="),
     "type": "unknown",
-    "schema_error": "task requires uid, terminal status, type, and finishedAt",
+    "task_type": "unknown",
+    "schema_error": schema_error,
+    "payload_bytes": payload_bytes,
+    "received_at": received_at,
     "original": original,
-    "timestamp": now()
+    "archive_key": archive_key,
+    "timestamp": received_time
   }
 }

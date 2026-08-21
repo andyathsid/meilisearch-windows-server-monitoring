@@ -22,14 +22,14 @@ scrape_configs:
       credentials_file: /run/secrets/meilisearch_metrics_key
     static_configs:
       - targets:
-          - 10.104.0.3:17700
+          - 10.104.0.2:17700
         labels:
           role: search-engine
 
   - job_name: windows
     static_configs:
       - targets:
-          - 10.104.0.3:19182
+          - 10.104.0.2:19182
         labels:
           role: search-host
 
@@ -40,7 +40,7 @@ scrape_configs:
         - meilisearch_health
     static_configs:
       - targets:
-          - http://10.104.0.3:17700/health
+          - http://10.104.0.2:17700/health
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
@@ -54,12 +54,46 @@ scrape_configs:
       - targets:
           - blackbox-exporter:9115
 
-  - job_name: vector
+  - job_name: vector-adapter
     static_configs:
       - targets:
-          - vector:9598
+          - vector-adapter:9598
         labels:
-          role: task-events
+          role: task-event-ingress
+
+  - job_name: vector-receiver
+    static_configs:
+      - targets:
+          - vector-receiver:9598
+        labels:
+          role: task-event-processing
+
+  - job_name: convoy-health
+    metrics_path: /probe
+    params:
+      module:
+        - http_2xx
+    static_configs:
+      - targets:
+          - http://convoy-web:5005/healthz
+          - http://convoy-agent:5008/healthz
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  - job_name: convoy-postgres
+    static_configs:
+      - targets:
+          - convoy-postgres-exporter:9187
+
+  - job_name: convoy-redis
+    static_configs:
+      - targets:
+          - convoy-redis-exporter:9121
 
   - job_name: loki
     static_configs:

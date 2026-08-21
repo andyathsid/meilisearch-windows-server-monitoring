@@ -3,6 +3,7 @@ services:
     image: prom/prometheus:${PROMETHEUS_VERSION:?set PROMETHEUS_VERSION}
     container_name: meili-prometheus
     restart: unless-stopped
+    mem_limit: 512m
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -20,43 +21,105 @@ services:
     depends_on:
       - blackbox-exporter
       - loki
-      - vector
+      - vector-adapter
+      - vector-receiver
+      - convoy-postgres-exporter
+      - convoy-redis-exporter
 
   blackbox-exporter:
     image: prom/blackbox-exporter:${BLACKBOX_EXPORTER_VERSION:?set BLACKBOX_EXPORTER_VERSION}
     container_name: meili-blackbox-exporter
     restart: unless-stopped
+    mem_limit: 64m
     command:
       - --config.file=/etc/blackbox_exporter/blackbox.yml
     volumes:
       - ./blackbox/blackbox.yml:/etc/blackbox_exporter/blackbox.yml:ro
 
-  vector:
+  vector-adapter:
     image: timberio/vector:${VECTOR_VERSION:?set VECTOR_VERSION}
-    container_name: meili-vector
+    container_name: meili-vector-adapter
     restart: unless-stopped
+    mem_limit: 256m
     working_dir: /etc/vector
+    entrypoint: [/usr/local/bin/vector-with-runtime-config.sh]
     command:
       - --config
-      - /etc/vector/vector.yaml
+      - /tmp/vector-runtime.yaml
+    environment:
+      MEILISEARCH_SOURCE_ID: ${MEILISEARCH_SOURCE_ID:?set MEILISEARCH_SOURCE_ID}
+      MEILISEARCH_SOURCE_GENERATION: ${MEILISEARCH_SOURCE_GENERATION:?set MEILISEARCH_SOURCE_GENERATION}
+      MONITORING_ENVIRONMENT: ${MONITORING_ENVIRONMENT:-production}
     ports:
       - 0.0.0.0:8687:8687
       - 127.0.0.1:9598:9598
     volumes:
-      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
-      - ./vector/normalize_meilisearch_task.vrl:/etc/vector/normalize_meilisearch_task.vrl:ro
-      - vector_data:/var/lib/vector
+      - ./vector/adapter.yaml:/etc/vector/vector.yaml:ro
+      - ./vector/vector-with-runtime-config.sh:/usr/local/bin/vector-with-runtime-config.sh:ro
+      - ./vector/prepare_meilisearch_gateway_event.vrl:/etc/vector/prepare_meilisearch_gateway_event.vrl:ro
+      - vector_adapter_data:/var/lib/vector
     secrets:
       - meilisearch_webhook_password
-      - vector_webhook_tls_cert
-      - vector_webhook_tls_key
-    depends_on:
-      - loki
+      - convoy_meilisearch_source_url
+      - convoy_ingest_password
+
+  vector-receiver:
+    image: timberio/vector:${VECTOR_VERSION:?set VECTOR_VERSION}
+    container_name: meili-vector-receiver
+    restart: unless-stopped
+    mem_limit: 384m
+    working_dir: /etc/vector
+    entrypoint: [/usr/local/bin/vector-with-runtime-config.sh]
+    command:
+      - --config
+      - /tmp/vector-runtime.yaml
+    environment:
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:?set R2_ACCOUNT_ID}
+      R2_BUCKET: ${R2_BUCKET:?set R2_BUCKET}
+      R2_ARCHIVE_PREFIX: ${R2_ARCHIVE_PREFIX:-meilisearch-task-events}
+    ports:
+      - 127.0.0.1:9599:9598
+    expose:
+      - '8688'
+    volumes:
+      - ./vector/receiver.yaml:/etc/vector/vector.yaml:ro
+      - ./vector/vector-with-runtime-config.sh:/usr/local/bin/vector-with-runtime-config.sh:ro
+      - ./vector/normalize_meilisearch_task.vrl:/etc/vector/normalize_meilisearch_task.vrl:ro
+      - vector_receiver_data:/var/lib/vector
+    secrets:
+      - convoy_vector_password
+      - r2_access_key_id
+      - r2_secret_access_key
+
+  vector-receiver-rejector:
+    profiles:
+      - showcase
+    image: timberio/vector:${VECTOR_VERSION:?set VECTOR_VERSION}
+    container_name: meili-vector-receiver-rejector
+    restart: 'no'
+    mem_limit: 128m
+    working_dir: /etc/vector
+    entrypoint: [/usr/local/bin/vector-with-runtime-config.sh]
+    command:
+      - --config
+      - /tmp/vector-runtime.yaml
+    expose:
+      - '8688'
+    networks:
+      default:
+        aliases:
+          - vector-receiver
+    volumes:
+      - ./vector/receiver-rejector.yaml:/etc/vector/vector.yaml:ro
+      - ./vector/vector-with-runtime-config.sh:/usr/local/bin/vector-with-runtime-config.sh:ro
+    secrets:
+      - convoy_vector_password
 
   loki:
     image: grafana/loki:${LOKI_VERSION:?set LOKI_VERSION}
     container_name: meili-loki
     restart: unless-stopped
+    mem_limit: 512m
     command:
       - -config.file=/etc/loki/loki.yml
     ports:
@@ -69,6 +132,7 @@ services:
     image: grafana/grafana:${GRAFANA_VERSION:?set GRAFANA_VERSION}
     container_name: meili-grafana
     restart: unless-stopped
+    mem_limit: 384m
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
@@ -85,20 +149,183 @@ services:
       - prometheus
       - loki
 
+  convoy-postgres:
+    image: postgres:${POSTGRES_VERSION:?set POSTGRES_VERSION}
+    container_name: meili-convoy-postgres
+    restart: unless-stopped
+    mem_limit: 640m
+    environment:
+      POSTGRES_DB: convoy
+      POSTGRES_USER: convoy
+      POSTGRES_PASSWORD_FILE: /run/secrets/convoy_postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - max_connections=100
+    volumes:
+      - convoy_postgres_data:/var/lib/postgresql/data
+    secrets:
+      - convoy_postgres_password
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U convoy -d convoy]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  convoy-redis:
+    image: redis:${REDIS_VERSION:?set REDIS_VERSION}
+    container_name: meili-convoy-redis
+    restart: unless-stopped
+    mem_limit: 256m
+    entrypoint: [/usr/local/bin/redis-with-secret.sh]
+    volumes:
+      - ./convoy/redis-with-secret.sh:/usr/local/bin/redis-with-secret.sh:ro
+      - convoy_redis_data:/data
+    secrets:
+      - convoy_redis_password
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$(cat /run/secrets/convoy_redis_password)" redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  convoy-migrate:
+    image: getconvoy/convoy:${CONVOY_VERSION:?set CONVOY_VERSION}@${CONVOY_IMAGE_DIGEST:?set CONVOY_IMAGE_DIGEST}
+    container_name: meili-convoy-migrate
+    mem_limit: 256m
+    entrypoint: [/usr/local/bin/convoy-with-secrets.sh]
+    command: [migrate, up, --config, /etc/convoy/convoy.json]
+    environment: &convoy-environment
+      CONVOY_ENV: oss
+      CONVOY_ANALYTICS_ENABLED: 'false'
+      CONVOY_SIGNUP_ENABLED: ${CONVOY_SIGNUP_ENABLED:-false}
+    volumes: &convoy-volumes
+      - ./convoy/convoy.json:/etc/convoy/convoy.json:ro
+      - ./convoy/convoy-with-secrets.sh:/usr/local/bin/convoy-with-secrets.sh:ro
+    secrets: &convoy-secrets
+      - convoy_postgres_password
+      - convoy_redis_password
+      - convoy_jwt_secret
+      - convoy_jwt_refresh_secret
+    depends_on:
+      convoy-postgres:
+        condition: service_healthy
+      convoy-redis:
+        condition: service_healthy
+    restart: 'no'
+
+  convoy-web:
+    image: getconvoy/convoy:${CONVOY_VERSION:?set CONVOY_VERSION}@${CONVOY_IMAGE_DIGEST:?set CONVOY_IMAGE_DIGEST}
+    container_name: meili-convoy-web
+    restart: unless-stopped
+    mem_limit: 256m
+    entrypoint: [/usr/local/bin/convoy-with-secrets.sh]
+    command: [server, --config, /etc/convoy/convoy.json]
+    environment: *convoy-environment
+    volumes: *convoy-volumes
+    secrets: *convoy-secrets
+    ports:
+      - 127.0.0.1:5005:5005
+    healthcheck:
+      test: [CMD-SHELL, wget -q --spider http://localhost:5005/healthz]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      convoy-migrate:
+        condition: service_completed_successfully
+
+  convoy-agent:
+    image: getconvoy/convoy:${CONVOY_VERSION:?set CONVOY_VERSION}@${CONVOY_IMAGE_DIGEST:?set CONVOY_IMAGE_DIGEST}
+    container_name: meili-convoy-agent
+    restart: unless-stopped
+    mem_limit: 256m
+    entrypoint: [/usr/local/bin/convoy-with-secrets.sh]
+    command: [agent, --config, /etc/convoy/convoy.json]
+    environment: *convoy-environment
+    volumes: *convoy-volumes
+    secrets: *convoy-secrets
+    healthcheck:
+      test: [CMD-SHELL, wget -q --spider http://localhost:5008/healthz]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    depends_on:
+      convoy-migrate:
+        condition: service_completed_successfully
+
+  convoy-postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:${POSTGRES_EXPORTER_VERSION:?set POSTGRES_EXPORTER_VERSION}
+    container_name: meili-convoy-postgres-exporter
+    restart: unless-stopped
+    mem_limit: 64m
+    environment:
+      DATA_SOURCE_URI: convoy-postgres:5432/convoy?sslmode=disable
+      DATA_SOURCE_USER: convoy
+      DATA_SOURCE_PASS_FILE: /run/secrets/convoy_postgres_password
+      PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres_exporter/convoy-queries.yaml
+    volumes:
+      - ./convoy/postgres-exporter-queries.yaml:/etc/postgres_exporter/convoy-queries.yaml:ro
+    secrets:
+      - convoy_postgres_password
+    depends_on:
+      convoy-postgres:
+        condition: service_healthy
+
+  convoy-redis-exporter:
+    image: oliver006/redis_exporter:${REDIS_EXPORTER_VERSION:?set REDIS_EXPORTER_VERSION}
+    container_name: meili-convoy-redis-exporter
+    restart: unless-stopped
+    mem_limit: 64m
+    entrypoint: [/usr/local/bin/redis-exporter-with-secret.sh]
+    volumes:
+      - ./convoy/redis-exporter-with-secret.sh:/usr/local/bin/redis-exporter-with-secret.sh:ro
+    secrets:
+      - convoy_redis_password
+    depends_on:
+      convoy-redis:
+        condition: service_healthy
+
 secrets:
   meilisearch_metrics_key:
     file: ./secrets/meilisearch_metrics_key
   meilisearch_webhook_password:
     file: ./secrets/meilisearch_webhook_password
-  vector_webhook_tls_cert:
-    file: ./secrets/vector_webhook_tls.crt
-  vector_webhook_tls_key:
-    file: ./secrets/vector_webhook_tls.key
   grafana_admin_password:
     file: ./secrets/grafana_admin_password
+  convoy_postgres_password:
+    file: ./secrets/convoy_postgres_password
+  convoy_redis_password:
+    file: ./secrets/convoy_redis_password
+  convoy_jwt_secret:
+    file: ./secrets/convoy_jwt_secret
+  convoy_jwt_refresh_secret:
+    file: ./secrets/convoy_jwt_refresh_secret
+  convoy_meilisearch_source_url:
+    file: ./secrets/convoy_meilisearch_source_url
+  convoy_ingest_password:
+    file: ./secrets/convoy_ingest_password
+  convoy_vector_password:
+    file: ./secrets/convoy_vector_password
+  r2_access_key_id:
+    file: ./secrets/r2_access_key_id
+  r2_secret_access_key:
+    file: ./secrets/r2_secret_access_key
 
 volumes:
   prometheus_data:
   grafana_data:
   loki_data:
-  vector_data:
+  vector_adapter_data:
+  vector_receiver_data:
+  convoy_postgres_data:
+  convoy_redis_data:

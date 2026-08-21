@@ -1,0 +1,35 @@
+# Remove transport metadata added by Vector's public HTTP source. These fields
+# are not part of the Meilisearch payload and would make retry identities vary.
+del(.path)
+del(.source_type)
+del(.timestamp)
+
+original = .
+source_id = get_env_var!("MEILISEARCH_SOURCE_ID")
+generation = get_env_var!("MEILISEARCH_SOURCE_GENERATION")
+environment = get_env_var!("MONITORING_ENVIRONMENT")
+
+assert!(match(source_id, r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'), "MEILISEARCH_SOURCE_ID must be a safe identifier")
+assert!(match(generation, r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'), "MEILISEARCH_SOURCE_GENERATION must be a safe identifier")
+
+payload_json = encode_json(original)
+payload_hash = sha2(payload_json, variant: "SHA-256")
+
+uid = null
+if is_integer(original.uid) {
+  uid_candidate = to_int!(original.uid)
+  if uid_candidate >= 0 {
+    uid = uid_candidate
+  }
+}
+
+event_id = "meilisearch:" + source_id + ":" + generation + ":invalid:" + payload_hash
+if uid != null {
+  event_id = "meilisearch:" + source_id + ":" + generation + ":" + to_string(uid)
+}
+
+.source_id = source_id
+.generation = generation
+.environment = environment
+.event_id = event_id
+.received_at = now()

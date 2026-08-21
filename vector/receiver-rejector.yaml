@@ -1,0 +1,31 @@
+data_dir: /tmp/vector-rejector
+timezone: UTC
+
+secret:
+  docker_secrets:
+    type: directory
+    path: /run/secrets
+    remove_trailing_whitespace: true
+
+sources:
+  synchronous_rejection:
+    type: http_server
+    address: 0.0.0.0:8688
+    path: /convoy/meilisearch/tasks
+    strict_path: true
+    method: POST
+    response_code: 503
+    framing:
+      method: bytes
+    decoding:
+      codec: json
+    auth:
+      strategy: basic
+      username: convoy
+      password: SECRET[docker_secrets.convoy_vector_password]
+
+sinks:
+  discard_rejected_event:
+    type: blackhole
+    inputs:
+      - synchronous_rejection

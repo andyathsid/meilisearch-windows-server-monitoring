@@ -158,14 +158,94 @@ groups:
 
   - name: meilisearch-task-events
     rules:
-      - alert: MeilisearchTaskWebhookVectorDown
-        expr: up{job="vector"} == 0
+      - alert: MeilisearchTaskWebhookAdapterDown
+        expr: up{job="vector-adapter"} == 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: Meilisearch task webhook receiver is unavailable
-          description: Prometheus cannot scrape Vector; task webhook delivery and Loki forwarding may be unavailable.
+          summary: Meilisearch task webhook adapter is unavailable
+          description: Prometheus cannot scrape the public Vector adapter; new Meilisearch webhook requests cannot enter the gateway pipeline.
+
+      - alert: MeilisearchTaskWebhookReceiverDown
+        expr: up{job="vector-receiver"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Convoy's Vector receiver is unavailable
+          description: Prometheus cannot scrape the internal Vector receiver; Convoy should retain and retry accepted deliveries.
+
+      - alert: ConvoyComponentUnavailable
+        expr: probe_success{job="convoy-health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Convoy control or data plane is unavailable
+          description: The health probe for {{ $labels.instance }} has failed for two minutes.
+
+      - alert: ConvoyPostgresUnavailable
+        expr: up{job="convoy-postgres"} == 0 or pg_up{job="convoy-postgres"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Convoy PostgreSQL is unavailable
+          description: Convoy cannot durably accept or schedule webhook events without PostgreSQL.
+
+      - alert: ConvoyRedisUnavailable
+        expr: up{job="convoy-redis"} == 0 or redis_up{job="convoy-redis"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Convoy Redis is unavailable
+          description: Convoy queue processing is degraded because Redis or its exporter is unavailable.
+
+      - alert: ConvoyDeliveryFailedOrDiscarded
+        expr: convoy_delivery_status_total{status=~"failed|discarded"} > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Convoy has failed or discarded task-event deliveries
+          description: Inspect the Convoy delivery record and retry after fixing the Vector destination.
+
+      - alert: ConvoyDeliveryRetrying
+        expr: convoy_delivery_status_total{status="retry"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Convoy task-event deliveries remain in retry
+          description: Convoy has retried delivery for five minutes; inspect vector-receiver availability and credentials.
+
+      - alert: ConvoyOldestPendingDeliveryHigh
+        expr: convoy_oldest_pending_delivery_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Convoy has an old unfinished delivery
+          description: The oldest scheduled, processing, or retrying delivery is more than five minutes old.
+
+      - alert: ConvoyRecentDeliveryAttemptsFailed
+        expr: convoy_failed_attempts_recent_total > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Convoy recently failed a delivery attempt
+          description: At least one delivery attempt failed in the last five minutes.
+
+      - alert: ConvoyDuplicateTaskEventDetected
+        expr: convoy_duplicate_events_recent_total > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Convoy received a duplicate task event
+          description: Retries are safe. If this follows a Meilisearch restore or UID reset, increment MEILISEARCH_SOURCE_GENERATION before accepting new events.
 
       - alert: MeilisearchTaskWebhookRejected
         expr: |
@@ -182,13 +262,13 @@ groups:
       - alert: MeilisearchTaskWebhookPipelineErrors
         expr: |
           sum(increase(vector_component_errors_total{
-            component_id=~"meilisearch_task_webhook|normalize_meilisearch_task|loki"
+            component_id=~"meilisearch_task_webhook|attach_meilisearch_gateway_identity|convoy|convoy_meilisearch_delivery|normalize_meilisearch_task|loki|r2_archive"
           }[5m])) > 0
         labels:
           severity: warning
         annotations:
           summary: Meilisearch task webhook pipeline reported errors
-          description: Vector reported receiver, normalization, buffering, or Loki delivery errors.
+          description: Vector reported receiver, normalization, Convoy, Loki, or R2 delivery errors.
 
       - alert: MeilisearchTaskWebhookSchemaInvalid
         expr: increase(meilisearch_task_webhook_invalid_events_total[5m]) > 0
@@ -200,23 +280,23 @@ groups:
 
       - alert: MeilisearchTaskWebhookBufferHigh
         expr: |
-          vector_buffer_size_bytes{component_id="loki"}
+          vector_buffer_byte_size{component_id=~"convoy|loki|r2_archive"}
           /
-          clamp_min(vector_buffer_max_size_bytes{component_id="loki"}, 1) > 0.8
+          clamp_min(vector_buffer_max_byte_size{component_id=~"convoy|loki|r2_archive"}, 1) > 0.8
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: Meilisearch task webhook buffer is over 80 percent full
-          description: Vector is accumulating task events because Loki cannot keep up or is unavailable.
+          description: Vector component {{ $labels.component_id }} is accumulating task events because its destination cannot keep up or is unavailable.
 
       - alert: MeilisearchTaskWebhookEventsDiscarded
-        expr: increase(vector_buffer_discarded_events_total{component_id="loki"}[5m]) > 0
+        expr: increase(vector_buffer_discarded_events_total{component_id=~"convoy|loki|r2_archive"}[5m]) > 0
         labels:
           severity: critical
         annotations:
           summary: Meilisearch task webhook events were discarded
-          description: Vector reports task events discarded from the Loki buffer; investigate disk capacity and Vector logs immediately.
+          description: Vector reports task events discarded from {{ $labels.component_id }}; investigate disk capacity and Vector logs immediately.
 
       - alert: LokiTargetDown
         expr: up{job="loki"} == 0

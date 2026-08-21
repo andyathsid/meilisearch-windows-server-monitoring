@@ -1,0 +1,51 @@
+convoy_delivery_status:
+  query: |
+    SELECT lower(status) AS status, count(*)::double precision AS total
+    FROM convoy.event_deliveries
+    WHERE deleted_at IS NULL
+    GROUP BY lower(status)
+  metrics:
+    - status:
+        usage: LABEL
+        description: Convoy event delivery state.
+    - total:
+        usage: GAUGE
+        description: Current Convoy event deliveries by state.
+
+convoy_oldest_pending_delivery:
+  query: |
+    SELECT COALESCE(
+      EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MIN(created_at))),
+      0
+    )::double precision AS seconds
+    FROM convoy.event_deliveries
+    WHERE deleted_at IS NULL
+      AND status IN ('Scheduled', 'Processing', 'Retry')
+  metrics:
+    - seconds:
+        usage: GAUGE
+        description: Age in seconds of the oldest unfinished Convoy delivery.
+
+convoy_failed_attempts_recent:
+  query: |
+    SELECT count(*)::double precision AS total
+    FROM convoy.delivery_attempts
+    WHERE deleted_at IS NULL
+      AND status = false
+      AND created_at >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+  metrics:
+    - total:
+        usage: GAUGE
+        description: Failed Convoy delivery attempts during the last five minutes.
+
+convoy_duplicate_events_recent:
+  query: |
+    SELECT count(*)::double precision AS total
+    FROM convoy.events
+    WHERE deleted_at IS NULL
+      AND is_duplicate_event = true
+      AND created_at >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+  metrics:
+    - total:
+        usage: GAUGE
+        description: Duplicate Convoy events received during the last five minutes.

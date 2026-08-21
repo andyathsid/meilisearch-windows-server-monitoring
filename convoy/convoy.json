@@ -1,0 +1,61 @@
+{
+  "api_version": "2025-11-24",
+  "host": "http://localhost:5005",
+  "database": {
+    "scheme": "postgres",
+    "host": "convoy-postgres",
+    "username": "convoy",
+    "database": "convoy",
+    "options": "sslmode=disable&connect_timeout=30",
+    "port": 5432,
+    "max_open_conn": 20,
+    "max_idle_conn": 5,
+    "conn_max_lifetime": 30
+  },
+  "redis": {
+    "scheme": "redis",
+    "host": "convoy-redis",
+    "port": 6379
+  },
+  "server": {
+    "http": {
+      "port": 5005,
+      "agent_port": 5008
+    }
+  },
+  "auth": {
+    "is_signup_enabled": false,
+    "native": {
+      "enabled": true
+    },
+    "jwt": {
+      "enabled": true,
+      "expiry": 3600,
+      "refresh_expiry": 604800
+    },
+    "portal": {
+      "enabled": false
+    }
+  },
+  "analytics": {
+    "enabled": false
+  },
+  "logger": {
+    "level": "info"
+  },
+  "retention_policy": {
+    "policy": "720h",
+    "enabled": false
+  },
+  "metrics": {
+    "enabled": false
+  },
+  "max_retry_seconds": 3600,
+  "dispatcher": {
+    "insecure_skip_verify": false,
+    "allow_list": ["0.0.0.0/0", "::/0"],
+    "block_list": ["127.0.0.0/8", "::1/128"],
+    "ping_methods": ["HEAD", "GET", "POST"],
+    "skip_ping_validation": false
+  }
+}

@@ -5,6 +5,7 @@
   "description": "Windows Meilisearch monitoring showcase and benchmark utilities",
   "scripts": {
     "showcase": "node showcase-meilisearch-monitoring-windows.js",
+    "showcase:idempotency": "node showcase-webhook-idempotency.js",
     "test": "node --test"
   },
   "engines": {

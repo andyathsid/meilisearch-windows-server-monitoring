@@ -1,0 +1,111 @@
+data_dir: ${VECTOR_DATA_DIR:-/var/lib/vector}
+timezone: UTC
+
+secret:
+  docker_secrets:
+    type: directory
+    path: ${VECTOR_SECRETS_DIR:-/run/secrets}
+    remove_trailing_whitespace: true
+
+sources:
+  meilisearch_task_webhook:
+    type: http_server
+    address: 0.0.0.0:8687
+    path: /meilisearch/tasks
+    strict_path: true
+    method: POST
+    response_code: 200
+    framing:
+      method: newline_delimited
+      newline_delimited:
+        max_length: 1048576
+    decoding:
+      codec: json
+    auth:
+      strategy: basic
+      username: meilisearch-webhook
+      password: SECRET[docker_secrets.meilisearch_webhook_password]
+
+  vector_internal_metrics:
+    type: internal_metrics
+    namespace: vector
+    scrape_interval_secs: 5
+
+transforms:
+  attach_meilisearch_gateway_identity:
+    type: remap
+    inputs:
+      - meilisearch_task_webhook
+    file: ./prepare_meilisearch_gateway_event.vrl
+
+sinks:
+  convoy:
+    type: http
+    inputs:
+      - attach_meilisearch_gateway_identity
+    uri: SECRET[docker_secrets.convoy_meilisearch_source_url]
+    method: post
+    auth:
+      strategy: basic
+      user: vector-adapter
+      password: SECRET[docker_secrets.convoy_ingest_password]
+    request:
+      headers:
+        Content-Type: application/json
+      timeout_secs: 15
+    healthcheck:
+      enabled: false
+    batch:
+      max_events: 1
+      timeout_secs: 0.1
+    framing:
+      method: bytes
+    encoding:
+      codec: json
+    acknowledgements:
+      enabled: true
+    buffer:
+      type: disk
+      max_size: 1073741824
+      when_full: block
+
+  prometheus:
+    type: prometheus_exporter
+    inputs:
+      - vector_internal_metrics
+    address: 0.0.0.0:9598
+    flush_period_secs: 60
+
+tests:
+  - name: attach stable gateway identity
+    inputs:
+      - insert_at: attach_meilisearch_gateway_identity
+        type: log
+        log_fields:
+          uid: 143
+          status: succeeded
+          type: documentAdditionOrUpdate
+    outputs:
+      - extract_from: attach_meilisearch_gateway_identity
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event_id, "meilisearch:windows-primary:1:143")
+              assert_eq!(.source_id, "windows-primary")
+              assert_eq!(.generation, "1")
+              assert!(is_timestamp(.received_at))
+
+  - name: attach stable invalid identity
+    inputs:
+      - insert_at: attach_meilisearch_gateway_identity
+        type: log
+        log_fields:
+          uid: bad
+          status: succeeded
+          type: documentAdditionOrUpdate
+    outputs:
+      - extract_from: attach_meilisearch_gateway_identity
+        conditions:
+          - type: vrl
+            source: |-
+              assert!(starts_with!(.event_id, "meilisearch:windows-primary:1:invalid:"))

@@ -1,0 +1,377 @@
+data_dir: ${VECTOR_DATA_DIR:-/var/lib/vector}
+timezone: UTC
+
+secret:
+  docker_secrets:
+    type: directory
+    path: ${VECTOR_SECRETS_DIR:-/run/secrets}
+    remove_trailing_whitespace: true
+
+sources:
+  convoy_meilisearch_delivery:
+    type: http_server
+    address: 0.0.0.0:8688
+    path: /convoy/meilisearch/tasks
+    strict_path: true
+    method: POST
+    response_code: 200
+    framing:
+      method: bytes
+    decoding:
+      codec: json
+    auth:
+      strategy: basic
+      username: convoy
+      password: SECRET[docker_secrets.convoy_vector_password]
+
+  vector_internal_metrics:
+    type: internal_metrics
+    namespace: vector
+    scrape_interval_secs: 5
+
+transforms:
+  normalize_meilisearch_task:
+    type: remap
+    inputs:
+      - convoy_meilisearch_delivery
+    file: ./normalize_meilisearch_task.vrl
+
+  decorate_meilisearch_task_for_loki:
+    type: remap
+    inputs:
+      - normalize_meilisearch_task
+    source: |-
+      status = string!(.status)
+      .status_badge = if status == "succeeded" {
+        decode_base64!("G1sxOzk3OzQybSBzdWNjZWVkZWQgG1swbQ==")
+      } else if status == "canceled" {
+        decode_base64!("G1sxOzMwOzQzbSBjYW5jZWxlZCAbWzBt")
+      } else if status == "failed" {
+        decode_base64!("G1sxOzk3OzQxbSBmYWlsZWQgG1swbQ==")
+      } else {
+        decode_base64!("G1sxOzk3OzQ1bSBpbnZhbGlkIBtbMG0=")
+      }
+
+  invalid_task_events:
+    type: filter
+    inputs:
+      - normalize_meilisearch_task
+    condition: '.event == "meilisearch_task_invalid"'
+
+  invalid_task_metrics:
+    type: log_to_metric
+    inputs:
+      - invalid_task_events
+    metrics:
+      - type: counter
+        field: event
+        name: meilisearch_task_webhook_invalid_events_total
+        kind: incremental
+
+sinks:
+  loki:
+    type: loki
+    inputs:
+      - decorate_meilisearch_task_for_loki
+    endpoint: http://loki:3100
+    path: /loki/api/v1/push
+    compression: snappy
+    out_of_order_action: accept
+    labels:
+      service_name: meilisearch-task-events
+      environment: '{{ environment }}'
+      event: '{{ event }}'
+      status: '{{ status }}'
+      task_type: '{{ task_type }}'
+    encoding:
+      codec: json
+      except_fields:
+        - archive_key
+    acknowledgements:
+      enabled: true
+    buffer:
+      type: disk
+      max_size: 1073741824
+      when_full: block
+
+  r2_archive:
+    type: aws_s3
+    inputs:
+      - normalize_meilisearch_task
+    bucket: ${R2_BUCKET}
+    endpoint: https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
+    region: auto
+    force_path_style: true
+    key_prefix: ${R2_ARCHIVE_PREFIX}/{{ archive_key }}
+    filename_time_format: ''
+    filename_append_uuid: false
+    filename_extension: json
+    compression: none
+    auth:
+      access_key_id: SECRET[docker_secrets.r2_access_key_id]
+      secret_access_key: SECRET[docker_secrets.r2_secret_access_key]
+    batch:
+      max_events: 1
+      timeout_secs: 1
+    framing:
+      method: newline_delimited
+    encoding:
+      codec: json
+      except_fields:
+        - archive_key
+    acknowledgements:
+      enabled: true
+    buffer:
+      type: disk
+      max_size: 1073741824
+      when_full: block
+
+  prometheus:
+    type: prometheus_exporter
+    inputs:
+      - vector_internal_metrics
+      - invalid_task_metrics
+    address: 0.0.0.0:9598
+    flush_period_secs: 60
+
+tests:
+  - name: normalize succeeded task
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          event_id: meilisearch:windows-primary:1:143
+          source_id: windows-primary
+          generation: "1"
+          environment: production
+          received_at: "2026-07-15T09:53:35Z"
+          uid: 143
+          batchUid: 143
+          indexUid: monitoring-smoke-test
+          status: succeeded
+          type: documentAdditionOrUpdate
+          details:
+            receivedDocuments: 2
+            indexedDocuments: 2
+          enqueuedAt: "2026-07-15T09:53:34.3191314Z"
+          startedAt: "2026-07-15T09:53:34.3230935Z"
+          finishedAt: "2026-07-15T09:53:34.3353739Z"
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event_id, "meilisearch:windows-primary:1:143")
+              assert_eq!(.status, "succeeded")
+              assert_eq!(.task_type, "documentAdditionOrUpdate")
+              assert_eq!(.index_uid, "monitoring-smoke-test")
+              assert_eq!(.received_documents, 2)
+              assert_eq!(.archive_key, "source=windows-primary/generation=1/uid=143")
+              assert!(is_timestamp(.timestamp))
+              assert!(to_float!(.duration_seconds) > 0.0)
+              assert!(to_float!(.queue_wait_seconds) > 0.0)
+
+  - name: normalize failed global task
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          source_id: windows-primary
+          generation: "1"
+          environment: production
+          received_at: "2026-07-15T10:00:03Z"
+          uid: 144
+          status: failed
+          type: indexSwap
+          enqueuedAt: "2026-07-15T10:00:00Z"
+          startedAt: "2026-07-15T10:00:01Z"
+          finishedAt: "2026-07-15T10:00:02Z"
+          error:
+            code: invalid_swap
+            type: invalid_request
+            message: controlled failure
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event_id, "meilisearch:windows-primary:1:144")
+              assert_eq!(.index_uid, "_global")
+              assert_eq!(.error_code, "invalid_swap")
+              assert_eq!(.error_message, "controlled failure")
+
+  - name: normalize canceled task
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          source_id: windows-primary
+          generation: "1"
+          environment: production
+          received_at: "2026-07-15T10:00:03Z"
+          uid: 145
+          status: canceled
+          type: taskCancelation
+          finishedAt: "2026-07-15T10:00:02Z"
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.status, "canceled")
+              assert_eq!(.task_type, "taskCancelation")
+
+  - name: bound unknown task type label
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          source_id: windows-primary
+          generation: "1"
+          environment: production
+          received_at: "2026-07-15T10:00:03Z"
+          uid: 146
+          status: succeeded
+          type: futureExperimentalTask
+          finishedAt: "2026-07-15T10:00:02Z"
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.type, "futureExperimentalTask")
+              assert_eq!(.task_type, "unknown")
+
+  - name: retain malformed uid
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          source_id: windows-primary
+          generation: "1"
+          environment: production
+          received_at: "2026-07-15T10:00:03Z"
+          uid: bad
+          status: succeeded
+          type: documentAdditionOrUpdate
+          finishedAt: "2026-07-15T10:00:02Z"
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event, "meilisearch_task_invalid")
+              assert_eq!(.schema_error, "uid must be a non-negative integer")
+              assert_eq!(.timestamp, t'2026-07-15T10:00:03Z')
+
+  - name: retain malformed type
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          source_id: windows-primary
+          generation: "1"
+          environment: production
+          received_at: "2026-07-15T10:00:03Z"
+          uid: 147
+          status: succeeded
+          type: 12
+          finishedAt: "2026-07-15T10:00:02Z"
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event, "meilisearch_task_invalid")
+              assert_eq!(.schema_error, "type must be a non-empty string")
+
+  - name: retain malformed timestamp
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          source_id: windows-primary
+          generation: "1"
+          environment: production
+          received_at: "2026-07-15T10:00:03Z"
+          uid: 148
+          status: succeeded
+          type: documentAdditionOrUpdate
+          finishedAt: not-a-timestamp
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event, "meilisearch_task_invalid")
+              assert_eq!(.schema_error, "finishedAt must be an RFC 3339 timestamp")
+
+  - name: duplicate inputs keep identical semantic identity
+    inputs:
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          source_id: windows-primary
+          generation: "1"
+          environment: production
+          received_at: "2026-07-15T10:00:03Z"
+          uid: 149
+          status: succeeded
+          type: documentAdditionOrUpdate
+          finishedAt: "2026-07-15T10:00:02Z"
+      - insert_at: normalize_meilisearch_task
+        type: log
+        log_fields:
+          source_id: windows-primary
+          generation: "1"
+          environment: production
+          received_at: "2026-07-15T10:00:03Z"
+          uid: 149
+          status: succeeded
+          type: documentAdditionOrUpdate
+          finishedAt: "2026-07-15T10:00:02Z"
+    outputs:
+      - extract_from: normalize_meilisearch_task
+        conditions:
+          - type: vrl
+            source: |-
+              assert_eq!(.event_id, "meilisearch:windows-primary:1:149")
+              assert_eq!(.archive_key, "source=windows-primary/generation=1/uid=149")
+
+  - name: decorate Loki event with deterministic ANSI status badge
+    inputs:
+      - insert_at: decorate_meilisearch_task_for_loki
+        type: log
+        log_fields:
+          status: succeeded
+          event_id: meilisearch:windows-primary:1:150
+      - insert_at: decorate_meilisearch_task_for_loki
+        type: log
+        log_fields:
+          status: canceled
+          event_id: meilisearch:windows-primary:1:151
+      - insert_at: decorate_meilisearch_task_for_loki
+        type: log
+        log_fields:
+          status: failed
+          event_id: meilisearch:windows-primary:1:152
+      - insert_at: decorate_meilisearch_task_for_loki
+        type: log
+        log_fields:
+          status: invalid
+          event_id: meilisearch:windows-primary:1:invalid:test
+    outputs:
+      - extract_from: decorate_meilisearch_task_for_loki
+        conditions:
+          - type: vrl
+            source: |-
+              status = string!(.status)
+              if status == "succeeded" {
+                assert_eq!(.status_badge, decode_base64!("G1sxOzk3OzQybSBzdWNjZWVkZWQgG1swbQ=="))
+              } else if status == "canceled" {
+                assert_eq!(.status_badge, decode_base64!("G1sxOzMwOzQzbSBjYW5jZWxlZCAbWzBt"))
+              } else if status == "failed" {
+                assert_eq!(.status_badge, decode_base64!("G1sxOzk3OzQxbSBmYWlsZWQgG1swbQ=="))
+              } else {
+                assert_eq!(.status_badge, decode_base64!("G1sxOzk3OzQ1bSBpbnZhbGlkIBtbMG0="))
+              }
